@@ -17,6 +17,7 @@
 
 #include <cstring>
 #include <functional>
+#include <unistd.h>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -140,6 +141,32 @@ void SigHandler::RemoveCodeBlock(u64 host_pc) {
     code_block_infos.erase(iter);
 }
 
+// Reports a fault fastmem did not claim. fmt::print cannot: it is not async-signal-safe, and it writes through the
+// FILE's own buffer, which not every platform's stderr provides (a PS5 title's does not, so the text lands on an
+// unmapped address and faults again). Nothing is reported while a handler is chained to below, because an emulator's
+// own handler takes these faults routinely, to commit its guest's pages as they are first touched.
+static void ReportUnhandled(int sig, u64 pc, const struct sigaction* chained) {
+    if ((chained->sa_flags & SA_SIGINFO) || (chained->sa_handler != SIG_DFL && chained->sa_handler != SIG_IGN)) {
+        return;
+    }
+
+    char line[64];
+    size_t length = 0;
+    const auto append = [&](const char* text) {
+        while (*text) {
+            line[length++] = *text++;
+        }
+    };
+    append("dynarmic: unhandled ");
+    append(sig == SIGSEGV ? "SIGSEGV" : "SIGBUS");
+    append(" at 0x");
+    for (int shift = 60; shift >= 0; shift -= 4) {
+        line[length++] = "0123456789abcdef"[(pc >> shift) & 0xf];
+    }
+    line[length++] = '\n';
+    (void)write(STDERR_FILENO, line, length);
+}
+
 void SigHandler::SigAction(int sig, siginfo_t* info, void* raw_context) {
     ASSERT(sig == SIGSEGV || sig == SIGBUS);
 
@@ -186,7 +213,7 @@ void SigHandler::SigAction(int sig, siginfo_t* info, void* raw_context) {
         }
     }
 
-    fmt::print(stderr, "Unhandled {} at rip {:#018x}\n", sig == SIGSEGV ? "SIGSEGV" : "SIGBUS", CTX_RIP);
+    ReportUnhandled(sig, CTX_RIP, sig == SIGSEGV ? &sig_handler->old_sa_segv : &sig_handler->old_sa_bus);
 
 #elif defined(MCL_ARCHITECTURE_ARM64)
 
@@ -245,7 +272,7 @@ void SigHandler::SigAction(int sig, siginfo_t* info, void* raw_context) {
         }
     }
 
-    fmt::print(stderr, "Unhandled {} at pc {:#018x}\n", sig == SIGSEGV ? "SIGSEGV" : "SIGBUS", CTX_PC);
+    ReportUnhandled(sig, CTX_PC, sig == SIGSEGV ? &sig_handler->old_sa_segv : &sig_handler->old_sa_bus);
 
 #elif defined(MCL_ARCHITECTURE_RISCV)
 

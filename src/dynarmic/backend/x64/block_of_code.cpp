@@ -12,6 +12,10 @@
 #    include <sys/mman.h>
 #endif
 
+#ifdef __PROSPERO__
+#    include <ps5platform/exec.h>
+#endif
+
 #ifdef __APPLE__
 #    include <errno.h>
 #    include <fmt/format.h>
@@ -73,6 +77,25 @@ public:
     }
 
     bool useProtect() const override { return false; }
+#elif defined(__PROSPERO__)
+    // A PS5 title cannot map anonymous memory, let alone executable memory. The platform layer's regions are direct
+    // memory, already readable, writable and executable, and placed within reach of rel32 calls into this code
+    uint8_t* alloc(size_t size) override {
+        void* p = ps5_exec_allocate(size, reinterpret_cast<uintptr_t>(&GetCodeAnchor));
+        if (p == nullptr) {
+            throw Xbyak::Error(Xbyak::ERR_CANT_ALLOC);
+        }
+        return static_cast<uint8_t*>(p);
+    }
+
+    void free(uint8_t* p) override {
+        ps5_exec_release(p);
+    }
+
+    bool useProtect() const override { return false; }
+
+private:
+    static void GetCodeAnchor() {}
 #else
     static constexpr size_t DYNARMIC_PAGE_SIZE = 4096;
 
